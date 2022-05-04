@@ -1,0 +1,8 @@
+3 ESLint rules behave differently from their TSLint counterparts:
+  * no-redeclare:
+    - ESLint does not support check-parameters.
+  * no-invalid-this:
+    - Functions in methods will no longer be ignored.
+  * no-void:
+    - ESLint does not support ignoring arrow function shorthand.
+

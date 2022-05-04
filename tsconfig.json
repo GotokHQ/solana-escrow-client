@@ -1,0 +1,19 @@
+{
+    "compilerOptions": {
+      "outDir": "./lib",
+      "rootDir": ".",
+      "target": "es6",
+      "declaration": true,
+      "removeComments": true,
+      "moduleResolution": "node",
+      "sourceMap": true,
+      "downlevelIteration": true,
+      "esModuleInterop": true,
+      "allowSyntheticDefaultImports": true,
+      "baseUrl": ".",
+      "skipLibCheck": true,
+      "module": "commonjs"
+    },
+    "include": ["./src/**/*"],
+    "exclude": ["./src/**/*.test.js", "node_modules", "**/node_modules"]
+  }

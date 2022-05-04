@@ -7,7 +7,7 @@ import {
   Connection,
   Keypair,
 } from '@solana/web3.js';
-import { TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import * as spl from '@solana/spl-token';
 import BN from 'bn.js';
 import {
   InitializePaymentInput,
@@ -20,18 +20,14 @@ import {
   SettleAndTransferInput,
 } from './types';
 import {
-  transfer,
   memoInstruction,
-  EscrowLayout,
-  Token,
-  TokenAccountLayout,
   WRAPPED_SOL_MINT,
-  initializeAccount,
-  ESCROW_ACCOUNT_DATA_LAYOUT,
-  ACCOUNT_LAYOUT,
   ASSOCIATED_TOKEN_PROGRAM_ID,
-  createAssociatedTokenAccountIx,
-} from './instructions'; //assertOwner,
+  ESCROW_SPAN,
+} from './instructions';
+import { InitEscrowArgs } from './transactions/InitEscrow';
+import { EscrowProgram } from './EscrowProgram';
+import { Escrow, EscrowData } from './accounts/escrow';
 
 export const FAILED_TO_FIND_ACCOUNT = 'Failed to find account';
 export const INVALID_ACCOUNT_OWNER = 'Invalid account owner';
@@ -59,7 +55,7 @@ export interface EscrowAccount {
 export class EscrowClient {
   private feePayer: Keypair;
   private authority: Keypair;
-  private hotWallet: Keypair;
+  private wallet: Keypair;
   private feeTaker: PublicKey;
   private escrowProgram: PublicKey;
   private connection: Connection;
@@ -70,58 +66,42 @@ export class EscrowClient {
     feeTaker: PublicKey,
     connection: Connection,
     escrowProgram: PublicKey,
-    hotWallet: Keypair,
+    wallet: Keypair,
   ) {
     this.feePayer = feePayer;
     this.authority = authority;
     this.feeTaker = feeTaker;
     this.connection = connection;
     this.escrowProgram = escrowProgram;
-    this.hotWallet = hotWallet;
+    this.wallet = wallet;
   }
 
   cancelEscrowPayment = async (
     input: CancelPaymentInput,
   ): Promise<CancelPaymentOutput> => {
     const escrowAddress = new PublicKey(input.escrowAddress);
-    const info = await this.connection.getAccountInfo(escrowAddress);
-    if (!info) {
+    const escrow = await Escrow.load(this.connection, escrowAddress);
+    if (!escrow.info) {
       throw new Error(FAILED_TO_FIND_ACCOUNT);
     }
-    if (!info.owner.equals(this.escrowProgram)) {
+    if (!escrow.info.owner.equals(this.escrowProgram)) {
       throw new Error(INVALID_ACCOUNT_OWNER);
     }
 
-    const accountInfo = ESCROW_ACCOUNT_DATA_LAYOUT.decode(
-      info.data,
-    ) as EscrowLayout;
-    const escrowState = {
-      escrowAddress,
-      isInitialized: !!accountInfo.isInitialized,
-      isSettled: !!accountInfo.isSettled,
-      isCanceled: !!accountInfo.isCanceled,
-      payerPubkey: accountInfo.payerPubkey,
-      payerTokenAccountPubkey: accountInfo.payerTokenAccountPubkey,
-      payeeTokenAccountPubkey: accountInfo.payeeTokenAccountPubkey,
-      payerTempTokenAccountPubkey: accountInfo.payerTempTokenAccountPubkey,
-      authorityPubkey: accountInfo.authorityPubkey,
-      feeTakerPubkey: accountInfo.feeTakerPubkey,
-      expectedAmount: new BN(accountInfo.amount, 10, 'le'),
-      fee: new BN(accountInfo.fee, 10, 'le'),
-    };
-    if (!this.authority.publicKey.equals(escrowState.authorityPubkey)) {
+    if (
+      !this.authority.publicKey.equals(
+        new PublicKey(escrow.data.authorityPubkey),
+      )
+    ) {
       throw new Error(INVALID_AUTHORITY);
     }
-    if (escrowState.isCanceled) {
+    if (escrow.data?.isCanceled) {
       throw new Error(ACCOUNT_ALREADY_CANCELED);
     }
-    if (escrowState.isSettled) {
+    if (escrow.data?.isSettled) {
       throw new Error(ACCOUNT_ALREADY_SETTLED);
     }
-    const PDA = await PublicKey.findProgramAddress(
-      [Buffer.from('escrow')],
-      this.escrowProgram,
-    );
+    const PDA = await EscrowProgram.findProgramAuthority();
     const exchangeInstruction = new TransactionInstruction({
       programId: this.escrowProgram,
       data: Buffer.from(Uint8Array.of(2)),
@@ -129,17 +109,17 @@ export class EscrowClient {
         { pubkey: this.authority.publicKey, isSigner: true, isWritable: false },
         { pubkey: escrowAddress, isSigner: false, isWritable: true },
         {
-          pubkey: accountInfo.payerTokenAccountPubkey,
+          pubkey: new PublicKey(escrow.data.payerTokenAccountPubkey),
           isSigner: false,
           isWritable: true,
         },
         { pubkey: this.feePayer.publicKey, isSigner: false, isWritable: true },
         {
-          pubkey: escrowState.payerTempTokenAccountPubkey,
+          pubkey: new PublicKey(escrow.data.payerTempTokenAccountPubkey),
           isSigner: false,
           isWritable: true,
         },
-        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: spl.NATIVE_MINT, isSigner: false, isWritable: false },
         { pubkey: PDA[0], isSigner: false, isWritable: false },
       ],
     });
@@ -191,121 +171,23 @@ export class EscrowClient {
     });
   };
 
-  _createAssociatedTokenAccountInternal = async (
-    owner: PublicKey,
-    tokenMintAddress: PublicKey,
-    associatedAddress: PublicKey,
-  ): Promise<PublicKey> => {
-    await this.connection.sendTransaction(
-      new Transaction().add(
-        createAssociatedTokenAccountIx(
-          this.feePayer.publicKey,
-          owner,
-          tokenMintAddress,
-          associatedAddress,
-        ),
-      ),
-      [this.feePayer],
-      {
-        skipPreflight: false,
-      },
-    );
-    return associatedAddress;
-  };
-
-  getOrCreateAssociatedAccountInfo = async (
+  getTokenAccountInfo = async (
     walletAddress: PublicKey,
-    splTokenMintAddress: PublicKey,
-  ): Promise<Token> => {
-    const associatedAddress = await _findAssociatedTokenAddress(
-      walletAddress,
-      splTokenMintAddress,
-    );
-
-    // This is the optimum logic, considering TX fee, client-side computation,
-    // RPC roundtrips and guaranteed idempotent.
-    // Sadly we can't do this atomically;
-    try {
-      return await this.getTokenAccountInfo(associatedAddress);
-    } catch (err) {
-      // INVALID_ACCOUNT_OWNER can be possible if the associatedAddress has
-      // already been received some lamports (= became system accounts).
-      // Assuming program derived addressing is safe, this is the only case
-      // for the INVALID_ACCOUNT_OWNER in this code-path
-      if (
-        err.message === FAILED_TO_FIND_ACCOUNT ||
-        err.message === INVALID_ACCOUNT_OWNER
-      ) {
-        // as this isn't atomic, it's possible others can create associated
-        // accounts meanwhile
-        try {
-          await this._createAssociatedTokenAccountInternal(
-            walletAddress,
-            splTokenMintAddress,
-            associatedAddress,
-          );
-        } catch (err) {
-          // ignore all errors; for now there is no API compatible way to
-          // selectively ignore the expected instruction error if the
-          // associated account is existing already.
-        }
-
-        // Now this should always succeed
-        return this.getTokenAccountInfo(associatedAddress);
-      } else {
-        throw err;
-      }
-    }
-  };
-
-  getTokenAccountInfo = async (walletAddress: PublicKey): Promise<Token> => {
+  ): Promise<spl.AccountInfo> => {
     const info = await this.connection.getAccountInfo(walletAddress);
     if (!info) {
       throw new Error(FAILED_TO_FIND_ACCOUNT);
     }
-    if (!info.owner.equals(TOKEN_PROGRAM_ID)) {
+    if (!info.owner.equals(spl.TOKEN_PROGRAM_ID)) {
       throw new Error(INVALID_ACCOUNT_OWNER);
     }
-    if (info.data.length !== TokenAccountLayout.span) {
+    if (info.data.length !== spl.AccountLayout.span) {
       throw new Error(`Invalid account size`);
     }
 
     const data = Buffer.from(info.data);
-    const accountInfo = TokenAccountLayout.decode(data) as any;
-    accountInfo.address = walletAddress;
-    accountInfo.mint = new PublicKey(accountInfo.mint);
-    accountInfo.owner = new PublicKey(accountInfo.owner);
-    accountInfo.amount = new BN(accountInfo.amount, 10, 'le');
-
-    if (accountInfo.delegateOption === 0) {
-      accountInfo.delegate = null;
-      accountInfo.delegatedAmount = new BN(0);
-    } else {
-      accountInfo.delegate = new PublicKey(accountInfo.delegate);
-      accountInfo.delegatedAmount = new BN(
-        accountInfo.delegatedAmount,
-        10,
-        'le',
-      );
-    }
-
-    accountInfo.isInitialized = accountInfo.state !== 0;
-    accountInfo.isFrozen = accountInfo.state === 2;
-
-    if (accountInfo.isNativeOption === 1) {
-      accountInfo.rentExemptReserve = new BN(accountInfo.isNative, 10, 'le');
-      accountInfo.isNative = true;
-    } else {
-      accountInfo.rentExemptReserve = null;
-      accountInfo.isNative = false;
-    }
-
-    if (accountInfo.closeAuthorityOption === 0) {
-      accountInfo.closeAuthority = null;
-    } else {
-      accountInfo.closeAuthority = new PublicKey(accountInfo.closeAuthority);
-    }
-    return accountInfo as Token;
+    const accountInfo = spl.AccountLayout.decode(data) as spl.AccountInfo;
+    return accountInfo;
   };
 
   initializeEscrowPayment = async (
@@ -317,17 +199,18 @@ export class EscrowClient {
     const tempTokenAccount = new Keypair();
     let transferXTokensToTempAccIx;
     const createTempTokenAccountIx = SystemProgram.createAccount({
-      programId: TOKEN_PROGRAM_ID,
-      space: ACCOUNT_LAYOUT.span,
-      lamports: await this.connection.getMinimumBalanceForRentExemption(
-        ACCOUNT_LAYOUT.span,
+      programId: spl.TOKEN_PROGRAM_ID,
+      space: spl.AccountLayout.span,
+      lamports: await spl.Token.getMinBalanceRentForExemptAccount(
+        this.connection,
       ),
       fromPubkey: this.feePayer.publicKey,
       newAccountPubkey: tempTokenAccount.publicKey,
     });
-    const initTempAccountIx = initializeAccount(
-      tempTokenAccount.publicKey,
+    const initTempAccountIx = spl.Token.createInitAccountInstruction(
+      spl.TOKEN_PROGRAM_ID,
       tokenMintAddress,
+      tempTokenAccount.publicKey,
       walletAddress,
     );
 
@@ -338,26 +221,30 @@ export class EscrowClient {
         lamports: Number(input.amount),
       });
     } else {
-      transferXTokensToTempAccIx = transfer(
+      transferXTokensToTempAccIx = spl.Token.createTransferInstruction(
+        spl.TOKEN_PROGRAM_ID,
         tokenAccountAddress,
         tempTokenAccount.publicKey,
-        new BN(input.amount),
         walletAddress,
+        [],
+        new BN(input.amount),
       );
     }
     const escrowAccount = new Keypair();
 
     const createEscrowAccountIx = SystemProgram.createAccount({
-      space: ESCROW_ACCOUNT_DATA_LAYOUT.span,
+      space: ESCROW_SPAN,
       lamports: await this.connection.getMinimumBalanceForRentExemption(
-        ESCROW_ACCOUNT_DATA_LAYOUT.span,
+        ESCROW_SPAN,
         'singleGossip',
       ),
       fromPubkey: this.feePayer.publicKey,
       newAccountPubkey: escrowAccount.publicKey,
       programId: this.escrowProgram,
     });
-
+    const data = InitEscrowArgs.serialize({
+      amount: new BN(input.amount),
+    });
     const initEscrowIx = new TransactionInstruction({
       programId: this.escrowProgram,
       keys: [
@@ -371,11 +258,9 @@ export class EscrowClient {
         { pubkey: escrowAccount.publicKey, isSigner: false, isWritable: true },
         { pubkey: tokenAccountAddress, isSigner: false, isWritable: false },
         { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
-        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: spl.TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       ],
-      data: Buffer.from(
-        Uint8Array.of(0, ...new BN(input.amount).toArray('le', 8)),
-      ),
+      data,
     });
     const transaction = new Transaction().add(createTempTokenAccountIx);
     if (tokenMintAddress.equals(WRAPPED_SOL_MINT)) {
@@ -465,7 +350,6 @@ export class EscrowClient {
     }
   };
 
-  
   settleEscrowPaymentAndTransfer = async (
     settlementInput: SettleAndTransferInput,
   ): Promise<SettlePaymentOutput> => {
@@ -479,10 +363,10 @@ export class EscrowClient {
       throw new Error(INVALID_ACCOUNT_OWNER);
     }
     const transaction = new Transaction();
-    const hotWalletAddress = this.hotWallet.publicKey;
+    const hotWalletAddress = this.wallet.publicKey;
     const { transactionInstruction, takerAccount } =
       await this.settlementInstruction(
-        this.hotWallet.publicKey,
+        this.wallet.publicKey,
         escrowAddress,
         new BN(settlementInput.amountToSettle),
         new BN(settlementInput.fee || 0),
@@ -496,13 +380,14 @@ export class EscrowClient {
       walletAddress,
       new PublicKey(settlementInput.transferTokenMintAddress),
     );
-    const transferBetweenAccountsTxn =
-      _createTransferBetweenSplTokenAccountsInstructionInternal(
-        hotWalletAddress,
-        sourcePublicKey,
-        destinationPublicKey,
-        new BN(settlementInput.amountToTransfer),
-      );
+    const transferBetweenAccountsTxn = spl.Token.createTransferInstruction(
+      spl.TOKEN_PROGRAM_ID,
+      sourcePublicKey,
+      destinationPublicKey,
+      hotWalletAddress,
+      [],
+      new BN(settlementInput.amountToTransfer),
+    );
     transaction.add(transferBetweenAccountsTxn);
     if (settlementInput.memo) {
       transaction.add(
@@ -513,7 +398,7 @@ export class EscrowClient {
       await this.connection.getRecentBlockhash()
     ).blockhash;
     transaction.feePayer = this.feePayer.publicKey;
-    transaction.sign(this.feePayer, this.authority, this.hotWallet);
+    transaction.sign(this.feePayer, this.authority, this.wallet);
     try {
       const signature = await this.connection.sendRawTransaction(
         transaction.serialize(),
@@ -536,50 +421,44 @@ export class EscrowClient {
     transactionInstruction: TransactionInstruction;
     takerAccount: PublicKey;
   }> => {
-    const info = await this.connection.getAccountInfo(escrowAddress);
-    if (!info) {
+    const escrow = await Escrow.load(this.connection, escrowAddress);
+    if (!escrow.info) {
       throw new Error(FAILED_TO_FIND_ACCOUNT);
     }
-    if (!info.owner.equals(this.escrowProgram)) {
+    if (!escrow.info.owner.equals(this.escrowProgram)) {
       throw new Error(INVALID_ACCOUNT_OWNER);
     }
-    const accountInfo = ESCROW_ACCOUNT_DATA_LAYOUT.decode(
-      info.data,
-    ) as EscrowLayout;
-    const escrowState = {
-      escrowAddress,
-      isInitialized: !!accountInfo.isInitialized,
-      isSettled: !!accountInfo.isSettled,
-      payerPubkey: accountInfo.payerPubkey,
-      payerTokenAccountPubkey: accountInfo.payerTokenAccountPubkey,
-      payeeTokenAccountPubkey: accountInfo.payeeTokenAccountPubkey,
-      payerTempTokenAccountPubkey: accountInfo.payerTempTokenAccountPubkey,
-      authorityPubkey: accountInfo.authorityPubkey,
-      feeTakerPubkey: accountInfo.feeTakerPubkey,
-      expectedAmount: new BN(accountInfo.amount, 10, 'le'),
-      fee: new BN(accountInfo.fee, 10, 'le'),
-    };
+
     const expectedAmount = amount;
     const fee = settlementFee || new BN(0);
 
-    if (!expectedAmount.eq(escrowState.expectedAmount)) {
+    if (!expectedAmount.eq(escrow.data.amount)) {
       throw new Error(AMOUNT_MISMATCH);
     }
-    if (!this.authority.publicKey.equals(escrowState.authorityPubkey)) {
+    const authority = new PublicKey(escrow.data.authorityPubkey);
+    if (!this.authority.publicKey.equals(authority)) {
       throw new Error(INVALID_AUTHORITY);
     }
-    const token = await this.getTokenAccountInfo(
-      escrowState.payerTempTokenAccountPubkey,
+    const payerTempToken = new PublicKey(
+      escrow.data.payerTempTokenAccountPubkey,
     );
+    const tokenInfo = await this.getTokenAccountInfo(payerTempToken);
+    const splToken = new spl.Token(
+      this.connection,
+      tokenInfo.address,
+      spl.TOKEN_PROGRAM_ID,
+      this.feePayer,
+    );
+
     let takerAccount = walletAddress;
     let feeTakerAccount = this.feeTaker;
 
-    if (!token.isNative) {
+    if (!tokenInfo.isNative) {
       takerAccount = (
-        await this.getOrCreateAssociatedAccountInfo(walletAddress, token.mint)
+        await splToken.getOrCreateAssociatedAccountInfo(walletAddress)
       ).address;
       feeTakerAccount = (
-        await this.getOrCreateAssociatedAccountInfo(this.feeTaker, token.mint)
+        await splToken.getOrCreateAssociatedAccountInfo(this.feeTaker)
       ).address;
     }
     const PDA = await PublicKey.findProgramAddress(
@@ -594,19 +473,18 @@ export class EscrowClient {
         { pubkey: takerAccount, isSigner: false, isWritable: true },
         { pubkey: feeTakerAccount, isSigner: false, isWritable: true },
         {
-          pubkey: escrowState.payerTempTokenAccountPubkey,
+          pubkey: payerTempToken,
           isSigner: false,
           isWritable: true,
         },
         { pubkey: escrowAddress, isSigner: false, isWritable: true },
         { pubkey: this.feePayer.publicKey, isSigner: false, isWritable: true },
-        { pubkey: TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: spl.TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
         { pubkey: PDA[0], isSigner: false, isWritable: false },
       ],
     });
     return { takerAccount, transactionInstruction: exchangeInstruction };
   };
-
 
   signTransaction = (transaction: Transaction): Buffer => {
     transaction.feePayer = this.feePayer.publicKey;
@@ -623,26 +501,10 @@ const _findAssociatedTokenAddress = async (
     await PublicKey.findProgramAddress(
       [
         walletAddress.toBuffer(),
-        TOKEN_PROGRAM_ID.toBuffer(),
+        spl.TOKEN_PROGRAM_ID.toBuffer(),
         tokenMintAddress.toBuffer(),
       ],
       ASSOCIATED_TOKEN_PROGRAM_ID,
     )
   )[0];
-};
-
-const _createTransferBetweenSplTokenAccountsInstructionInternal = (
-  ownerPublicKey: PublicKey,
-  sourcePublicKey: PublicKey,
-  destinationPublicKey: PublicKey,
-  amount: BN,
-  memo?: string,
-): Transaction => {
-  const transaction = new Transaction().add(
-    transfer(sourcePublicKey, destinationPublicKey, amount, ownerPublicKey),
-  );
-  if (memo) {
-    transaction.add(memoInstruction(memo));
-  }
-  return transaction;
 };

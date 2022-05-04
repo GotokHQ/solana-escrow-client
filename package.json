@@ -34,6 +34,7 @@
     "trailingComma": "all"
   },
   "dependencies": {
+    "@metaplex-foundation/mpl-core": "^0.0.5",
     "@solana/spl-token": "^0.2.0",
     "@solana/web3.js": "^1.41.3",
     "@types/bs58": "^4.0.1",

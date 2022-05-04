@@ -25,7 +25,6 @@ import {
   ASSOCIATED_TOKEN_PROGRAM_ID,
   ESCROW_SPAN,
 } from './instructions';
-import { InitEscrowArgs } from './transactions/InitEscrow';
 import { EscrowProgram } from './EscrowProgram';
 import { Escrow } from './accounts/escrow';
 
@@ -242,9 +241,6 @@ export class EscrowClient {
       newAccountPubkey: escrowAccount.publicKey,
       programId: this.escrowProgram,
     });
-    const data = InitEscrowArgs.serialize({
-      amount: new BN(input.amount),
-    });
     const initEscrowIx = new TransactionInstruction({
       programId: this.escrowProgram,
       keys: [
@@ -260,7 +256,9 @@ export class EscrowClient {
         { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
         { pubkey: spl.TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       ],
-      data,
+      data: Buffer.from(
+        Uint8Array.of(0, ...new BN(input.amount).toArray('le', 8)),
+      ),
     });
     const transaction = new Transaction().add(createTempTokenAccountIx);
     if (tokenMintAddress.equals(WRAPPED_SOL_MINT)) {

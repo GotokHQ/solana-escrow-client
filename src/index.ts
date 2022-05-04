@@ -27,7 +27,7 @@ import {
 } from './instructions';
 import { InitEscrowArgs } from './transactions/InitEscrow';
 import { EscrowProgram } from './EscrowProgram';
-import { Escrow, EscrowData } from './accounts/escrow';
+import { Escrow } from './accounts/escrow';
 
 export const FAILED_TO_FIND_ACCOUNT = 'Failed to find account';
 export const INVALID_ACCOUNT_OWNER = 'Invalid account owner';

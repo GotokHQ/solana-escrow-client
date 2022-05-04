@@ -56,7 +56,7 @@ export interface EscrowAccount {
   fee: BN;
 }
 
-export class WalletServiceClient {
+export class EscrowClient {
   private feePayer: Keypair;
   private authority: Keypair;
   private hotWallet: Keypair;

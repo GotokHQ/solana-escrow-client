@@ -25,7 +25,7 @@ const toArrayBuffer = (buf: Buffer): Uint8Array => {
   return view;
 }
 
-const walletServiceClient = new EscrowClient(
+const client = new EscrowClient(
   Keypair.fromSecretKey(toArrayBuffer(Buffer.from(process.env.FEE_PAYER!, 'base64'))),
   Keypair.fromSecretKey(toArrayBuffer(Buffer.from(process.env.AUTHORITY!, 'base64'))),
   new PublicKey(process.env.FEE_TAKER!),

@@ -1,18 +1,15 @@
 {
     "compilerOptions": {
       "outDir": "./lib",
-      "rootDir": ".",
-      "target": "es6",
+      "allowJs": true,
+      "checkJs": true,
       "declaration": true,
-      "removeComments": true,
-      "moduleResolution": "node",
+      "declarationMap": true,
+      "noImplicitAny": false,
+      "resolveJsonModule": true,
       "sourceMap": true,
-      "downlevelIteration": true,
-      "esModuleInterop": true,
       "allowSyntheticDefaultImports": true,
-      "baseUrl": ".",
-      "skipLibCheck": true,
-      "module": "commonjs"
+      "typeRoots": ["types/", "node_modules/@types"],
     },
     "include": ["./src/**/*"],
     "exclude": ["./src/**/*.test.js", "node_modules", "**/node_modules"]

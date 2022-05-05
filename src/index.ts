@@ -39,6 +39,9 @@ export const AMOUNT_MISMATCH = 'Amount mismatch';
 export const FEE_MISMATCH = 'Fee mismatch';
 export const TRANSACTION_SEND_ERROR = 'Transaction send error';
 
+export * from './EscrowProgram';
+export * from './accounts';
+
 export interface EscrowAccount {
   isInitialized: boolean;
   isSettled: boolean;
@@ -420,7 +423,7 @@ export class EscrowClient {
     takerAccount: PublicKey;
   }> => {
     const escrow = await Escrow.load(this.connection, escrowAddress);
-    if (!escrow.info) {
+    if (!escrow || !escrow.info) {
       throw new Error(FAILED_TO_FIND_ACCOUNT);
     }
     if (!escrow.info.owner.equals(this.escrowProgram)) {

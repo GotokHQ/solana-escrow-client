@@ -34,9 +34,11 @@
     "trailingComma": "all"
   },
   "dependencies": {
+    "@types/bn.js": "^5.1.0",
     "@metaplex-foundation/mpl-core": "^0.0.5",
     "@solana/spl-token": "^0.2.0",
-    "@solana/web3.js": "^1.41.3"
+    "@solana/web3.js": "^1.41.3",
+    "bn.js": "^5.2.0"
   },
   "browserslist": [
     ">0.2%",

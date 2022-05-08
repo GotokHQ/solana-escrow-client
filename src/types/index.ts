@@ -1,10 +1,3 @@
-
-export interface InitializePaymentInput {
-    walletAddress: string;
-    tokenAccountAddress: string;
-    tokenMintAddress: string;
-}
-
 export interface InitializePaymentOutput {
     message: string;
     signatures: Sig[];
@@ -17,10 +10,11 @@ export interface Sig {
 }
 
 export interface InitializePaymentInput {
-    walletAddress: string;
-    tokenAccountAddress: string;
+    payerWalletAddress: string;
+    payeeWalletAddress: string;
     tokenMintAddress: string;
     amount: string;
+    fee?: string;
     memo?: string;
 }
 export interface SettlePaymentInput {
@@ -28,7 +22,6 @@ export interface SettlePaymentInput {
     amount: string;
     escrowAddress: string
     memo?: string;
-    fee?: number;
 }
 
 export interface SettleAndTransferInput {

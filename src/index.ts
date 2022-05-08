@@ -42,22 +42,9 @@ export const TRANSACTION_SEND_ERROR = 'Transaction send error';
 export * from './EscrowProgram';
 export * from './accounts';
 
-export interface EscrowAccount {
-  isInitialized: boolean;
-  isSettled: boolean;
-  payerPubkey: PublicKey;
-  payeePubkey: PublicKey;
-  payerTempTokenAccountPubkey: PublicKey;
-  authorityPubkey: PublicKey;
-  feeTakerPubkey: PublicKey;
-  amount: BN;
-  fee: BN;
-}
-
 export class EscrowClient {
   private feePayer: Keypair;
   private authority: Keypair;
-  private wallet: Keypair;
   private feeTaker: PublicKey;
   private escrowProgram: PublicKey;
   private connection: Connection;
@@ -68,14 +55,12 @@ export class EscrowClient {
     feeTaker: PublicKey,
     connection: Connection,
     escrowProgram: PublicKey,
-    wallet: Keypair,
   ) {
     this.feePayer = feePayer;
     this.authority = authority;
     this.feeTaker = feeTaker;
     this.connection = connection;
     this.escrowProgram = escrowProgram;
-    this.wallet = wallet;
   }
 
   cancelEscrowPayment = async (
@@ -92,7 +77,7 @@ export class EscrowClient {
 
     if (
       !this.authority.publicKey.equals(
-        new PublicKey(escrow.data.authorityPubkey),
+        new PublicKey(escrow.data.authority),
       )
     ) {
       throw new Error(INVALID_AUTHORITY);
@@ -103,7 +88,7 @@ export class EscrowClient {
     if (escrow.data?.isSettled) {
       throw new Error(ACCOUNT_ALREADY_SETTLED);
     }
-    const PDA = await EscrowProgram.findProgramAuthority();
+    const [vault] = await EscrowProgram.findProgramAuthority();
     const exchangeInstruction = new TransactionInstruction({
       programId: this.escrowProgram,
       data: Buffer.from(Uint8Array.of(2)),
@@ -111,18 +96,18 @@ export class EscrowClient {
         { pubkey: this.authority.publicKey, isSigner: true, isWritable: false },
         { pubkey: escrowAddress, isSigner: false, isWritable: true },
         {
-          pubkey: new PublicKey(escrow.data.payerTokenAccountPubkey),
+          pubkey: new PublicKey(escrow.data.payerToken),
           isSigner: false,
           isWritable: true,
         },
         { pubkey: this.feePayer.publicKey, isSigner: false, isWritable: true },
         {
-          pubkey: new PublicKey(escrow.data.payerTempTokenAccountPubkey),
+          pubkey: new PublicKey(escrow.data.vaultToken),
           isSigner: false,
           isWritable: true,
         },
-        { pubkey: spl.NATIVE_MINT, isSigner: false, isWritable: false },
-        { pubkey: PDA[0], isSigner: false, isWritable: false },
+        { pubkey: spl.TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
+        { pubkey: vault, isSigner: false, isWritable: false },
       ],
     });
     const transaction = new Transaction().add(exchangeInstruction);
@@ -195,9 +180,15 @@ export class EscrowClient {
   initializeEscrowPayment = async (
     input: InitializePaymentInput,
   ): Promise<InitializePaymentOutput> => {
-    const walletAddress = new PublicKey(input.walletAddress);
+    const walletAddress = new PublicKey(input.payerWalletAddress);
     const tokenMintAddress = new PublicKey(input.tokenMintAddress);
-    const tokenAccountAddress = new PublicKey(input.tokenAccountAddress);
+    const splToken = new spl.Token(
+      this.connection,
+      tokenMintAddress,
+      spl.TOKEN_PROGRAM_ID,
+      this.feePayer,
+    );
+
     const tempTokenAccount = new Keypair();
     let transferXTokensToTempAccIx;
     const createTempTokenAccountIx = SystemProgram.createAccount({
@@ -215,23 +206,6 @@ export class EscrowClient {
       tempTokenAccount.publicKey,
       walletAddress,
     );
-
-    if (tokenMintAddress.equals(WRAPPED_SOL_MINT)) {
-      transferXTokensToTempAccIx = SystemProgram.transfer({
-        fromPubkey: tokenAccountAddress,
-        toPubkey: tempTokenAccount.publicKey,
-        lamports: Number(input.amount),
-      });
-    } else {
-      transferXTokensToTempAccIx = spl.Token.createTransferInstruction(
-        spl.TOKEN_PROGRAM_ID,
-        tokenAccountAddress,
-        tempTokenAccount.publicKey,
-        walletAddress,
-        [],
-        new BN(input.amount),
-      );
-    }
     const escrowAccount = new Keypair();
 
     const createEscrowAccountIx = SystemProgram.createAccount({
@@ -244,10 +218,47 @@ export class EscrowClient {
       newAccountPubkey: escrowAccount.publicKey,
       programId: this.escrowProgram,
     });
+    const fee = new BN(input.fee || 0);
+
+    splToken.publicKey;
+    let feeTakerAccount = this.feeTaker;
+    let payerTokenAddress = new PublicKey(input.payerWalletAddress);
+    let payeeTokenAddress = new PublicKey(input.payeeWalletAddress);
+
+    if (tokenMintAddress.equals(WRAPPED_SOL_MINT)) {
+      transferXTokensToTempAccIx = SystemProgram.transfer({
+        fromPubkey: payerTokenAddress,
+        toPubkey: tempTokenAccount.publicKey,
+        lamports: Number(input.amount),
+      });
+    } else {
+      payerTokenAddress = (
+        await splToken.getOrCreateAssociatedAccountInfo(payerTokenAddress)
+      ).address;
+      payeeTokenAddress = (
+        await splToken.getOrCreateAssociatedAccountInfo(payeeTokenAddress)
+      ).address;
+      feeTakerAccount = (
+        await splToken.getOrCreateAssociatedAccountInfo(this.feeTaker)
+      ).address;
+      transferXTokensToTempAccIx = spl.Token.createTransferInstruction(
+        spl.TOKEN_PROGRAM_ID,
+        payerTokenAddress,
+        tempTokenAccount.publicKey,
+        walletAddress,
+        [],
+        new BN(input.amount),
+      );
+    }
+
     const initEscrowIx = new TransactionInstruction({
       programId: this.escrowProgram,
       keys: [
-        { pubkey: walletAddress, isSigner: true, isWritable: false },
+        {
+          pubkey: new PublicKey(input.payerWalletAddress),
+          isSigner: true,
+          isWritable: false,
+        },
         {
           pubkey: tempTokenAccount.publicKey,
           isSigner: false,
@@ -255,12 +266,27 @@ export class EscrowClient {
         },
         { pubkey: this.authority.publicKey, isSigner: true, isWritable: false },
         { pubkey: escrowAccount.publicKey, isSigner: false, isWritable: true },
-        { pubkey: tokenAccountAddress, isSigner: false, isWritable: false },
+        {
+          pubkey: payerTokenAddress,
+          isSigner: false,
+          isWritable: false,
+        },
+        {
+          pubkey: payeeTokenAddress,
+          isSigner: false,
+          isWritable: false,
+        },
+        {
+          pubkey: feeTakerAccount,
+          isSigner: false,
+          isWritable: false,
+        },
         { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false },
         { pubkey: spl.TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
       ],
       data: Buffer.from(
         Uint8Array.of(0, ...new BN(input.amount).toArray('le', 8)),
+        ...fee.toArray('le', 8),
       ),
     });
     const transaction = new Transaction().add(createTempTokenAccountIx);
@@ -312,7 +338,6 @@ export class EscrowClient {
   settleEscrowPayment = async (
     input: SettlePaymentInput,
   ): Promise<SettlePaymentOutput> => {
-    const walletAddress = new PublicKey(input.walletAddress);
     const escrowAddress = new PublicKey(input.escrowAddress);
     const info = await this.connection.getAccountInfo(escrowAddress);
     if (!info) {
@@ -323,12 +348,7 @@ export class EscrowClient {
     }
     const transaction = new Transaction();
     const { transactionInstruction, takerAccount } =
-      await this.settlementInstruction(
-        walletAddress,
-        escrowAddress,
-        new BN(input.amount),
-        new BN(input.fee || 0),
-      );
+      await this.settlementInstruction(escrowAddress);
     transaction.add(transactionInstruction);
     if (input.memo) {
       transaction.add(memoInstruction(input.memo, this.authority.publicKey));
@@ -364,17 +384,12 @@ export class EscrowClient {
       throw new Error(INVALID_ACCOUNT_OWNER);
     }
     const transaction = new Transaction();
-    const hotWalletAddress = this.wallet.publicKey;
+    const [vault] = await EscrowProgram.findProgramAuthority();
     const { transactionInstruction, takerAccount } =
-      await this.settlementInstruction(
-        this.wallet.publicKey,
-        escrowAddress,
-        new BN(settlementInput.amountToSettle),
-        new BN(settlementInput.fee || 0),
-      );
+      await this.settlementInstruction(escrowAddress);
     transaction.add(transactionInstruction);
     const sourcePublicKey = await _findAssociatedTokenAddress(
-      hotWalletAddress,
+      vault,
       new PublicKey(settlementInput.transferTokenMintAddress),
     );
     const destinationPublicKey = await _findAssociatedTokenAddress(
@@ -385,7 +400,7 @@ export class EscrowClient {
       spl.TOKEN_PROGRAM_ID,
       sourcePublicKey,
       destinationPublicKey,
-      hotWalletAddress,
+      vault,
       [],
       new BN(settlementInput.amountToTransfer),
     );
@@ -396,10 +411,10 @@ export class EscrowClient {
       );
     }
     transaction.recentBlockhash = (
-      await this.connection.getRecentBlockhash()
+      await this.connection.getLatestBlockhash()
     ).blockhash;
     transaction.feePayer = this.feePayer.publicKey;
-    transaction.sign(this.feePayer, this.authority, this.wallet);
+    transaction.sign(this.feePayer, this.authority);
     try {
       const signature = await this.connection.sendRawTransaction(
         transaction.serialize(),
@@ -414,10 +429,7 @@ export class EscrowClient {
   };
 
   settlementInstruction = async (
-    walletAddress: PublicKey,
     escrowAddress: PublicKey,
-    amount: BN,
-    settlementFee: BN = new BN(0),
   ): Promise<{
     transactionInstruction: TransactionInstruction;
     takerAccount: PublicKey;
@@ -429,62 +441,42 @@ export class EscrowClient {
     if (!escrow.info.owner.equals(this.escrowProgram)) {
       throw new Error(INVALID_ACCOUNT_OWNER);
     }
-
-    const expectedAmount = amount;
-    const fee = settlementFee || new BN(0);
-
-    if (!expectedAmount.eq(escrow.data.amount)) {
-      throw new Error(AMOUNT_MISMATCH);
-    }
-    const authority = new PublicKey(escrow.data.authorityPubkey);
+    const authority = new PublicKey(escrow.data.authority);
     if (!this.authority.publicKey.equals(authority)) {
       throw new Error(INVALID_AUTHORITY);
     }
-    const payerTempToken = new PublicKey(
-      escrow.data.payerTempTokenAccountPubkey,
+    const vaultToken = new PublicKey(
+      escrow.data.vaultToken,
     );
-    const tokenInfo = await this.getTokenAccountInfo(payerTempToken);
-    const splToken = new spl.Token(
-      this.connection,
-      tokenInfo.address,
-      spl.TOKEN_PROGRAM_ID,
-      this.feePayer,
+    const payeeToken = new PublicKey(
+      escrow.data?.payeeToken,
     );
-
-    let takerAccount = walletAddress;
-    let feeTakerAccount = this.feeTaker;
-
-    if (!tokenInfo.isNative) {
-      takerAccount = (
-        await splToken.getOrCreateAssociatedAccountInfo(walletAddress)
-      ).address;
-      feeTakerAccount = (
-        await splToken.getOrCreateAssociatedAccountInfo(this.feeTaker)
-      ).address;
-    }
-    const PDA = await PublicKey.findProgramAddress(
-      [Buffer.from('escrow')],
-      this.escrowProgram,
+    const feeToken = new PublicKey(
+      escrow.data?.feeToken,
     );
+    const [vault] = await EscrowProgram.findProgramAuthority();
     const exchangeInstruction = new TransactionInstruction({
       programId: this.escrowProgram,
-      data: Buffer.from(Uint8Array.of(1, ...fee.toArray('le', 8))),
+      data: Buffer.from(Uint8Array.of(1)),
       keys: [
         { pubkey: this.authority.publicKey, isSigner: true, isWritable: false },
-        { pubkey: takerAccount, isSigner: false, isWritable: true },
-        { pubkey: feeTakerAccount, isSigner: false, isWritable: true },
+        { pubkey: payeeToken, isSigner: false, isWritable: true },
+        { pubkey: feeToken, isSigner: false, isWritable: true },
         {
-          pubkey: payerTempToken,
+          pubkey: vaultToken,
           isSigner: false,
           isWritable: true,
         },
         { pubkey: escrowAddress, isSigner: false, isWritable: true },
         { pubkey: this.feePayer.publicKey, isSigner: false, isWritable: true },
         { pubkey: spl.TOKEN_PROGRAM_ID, isSigner: false, isWritable: false },
-        { pubkey: PDA[0], isSigner: false, isWritable: false },
+        { pubkey: vault, isSigner: false, isWritable: false },
       ],
     });
-    return { takerAccount, transactionInstruction: exchangeInstruction };
+    return {
+      takerAccount: payeeToken,
+      transactionInstruction: exchangeInstruction,
+    };
   };
 
   signTransaction = (transaction: Transaction): Buffer => {

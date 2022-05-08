@@ -18,24 +18,24 @@ export class EscrowData extends Borsh.Data<EscrowDataArgs> {
     ['isInitialized', 'u8'],
     ['isSettled', 'u8'],
     ['isCanceled', 'u8'],
-    ['payerPubkey', 'pubkeyAsString'],
-    ['payerTokenAccountPubkey', 'pubkeyAsString'],
-    ['payeeTokenAccountPubkey', 'pubkeyAsString'],
-    ['payerTempTokenAccountPubkey', 'pubkeyAsString'],
-    ['authorityPubkey', 'pubkeyAsString'],
-    ['feeTakerPubkey', 'pubkeyAsString'],
+    ['payer', 'pubkeyAsString'],
+    ['payerToken', 'pubkeyAsString'],
+    ['payeeToken', 'pubkeyAsString'],
+    ['vaultToken', 'pubkeyAsString'],
+    ['authority', 'pubkeyAsString'],
+    ['feeToken', 'pubkeyAsString'],
     ['amount', 'u64'],
     ['fee', 'u64'],
   ]);
   isInitialized: boolean;
   isSettled: boolean;
   isCanceled: boolean;
-  payerPubkey: StringPublicKey;
-  payerTokenAccountPubkey: StringPublicKey;
-  payeeTokenAccountPubkey: StringPublicKey;
-  payerTempTokenAccountPubkey: StringPublicKey;
-  authorityPubkey: StringPublicKey;
-  feeTakerPubkey: StringPublicKey;
+  payer: StringPublicKey;
+  payerToken: StringPublicKey;
+  payeeToken: StringPublicKey;
+  vaultToken: StringPublicKey;
+  authority: StringPublicKey;
+  feeToken: StringPublicKey;
   amount: BN;
   fee: BN;
 
